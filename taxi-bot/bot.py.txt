@@ -1,0 +1,92 @@
+import logging
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import psycopg2
+import googlemaps
+
+# Настройки
+DB_CONFIG = {
+    'dbname': 'taxi_bot',
+    'user': 'your_username',
+    'password': 'your_password',
+    'host': 'localhost'
+}
+GMAPS_API_KEY = 'your_google_maps_api_key'
+TELEGRAM_BOT_TOKEN = 'your_telegram_bot_token'
+
+# Логирование
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Инициализация Google Maps
+gmaps = googlemaps.Client(key=GMAPS_API_KEY)
+
+# Команда /start
+def start(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text("Привет! Я бот для заказа такси. Используй /order, чтобы начать.")
+
+# Команда /order
+def order(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text("Пожалуйста, отправьте ваше местоположение (используйте кнопку 'Отправить местоположение').")
+
+# Обработка местоположения
+def handle_location(update: Update, context: CallbackContext) -> None:
+    user_location = update.message.location
+    user_id = update.effective_user.id
+
+    # Сохраняем местоположение пользователя
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO Users (telegram_id, location) VALUES (%s, %s) ON CONFLICT (telegram_id) DO UPDATE SET location = %s",
+                   (user_id, f"{user_location.latitude},{user_location.longitude}", f"{user_location.latitude},{user_location.longitude}"))
+    conn.commit()
+    conn.close()
+
+    # Поиск ближайшего водителя
+    nearest_driver = find_nearest_driver(user_location.latitude, user_location.longitude)
+    if nearest_driver:
+        update.message.reply_text(f"Найден водитель: {nearest_driver['name']}. Подтвердите заказ: /confirm")
+    else:
+        update.message.reply_text("К сожалению, водители не найдены. Попробуйте позже.")
+
+# Поиск ближайшего водителя
+def find_nearest_driver(lat: float, lon: float) -> dict:
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Drivers WHERE status = 'active'")
+    drivers = cursor.fetchall()
+    conn.close()
+
+    nearest_driver = None
+    min_distance = float('inf')
+    for driver in drivers:
+        driver_lat, driver_lon = map(float, driver[5].split(','))
+        distance = (driver_lat - lat) ** 2 + (driver_lon - lon) ** 2
+        if distance < min_distance:
+            min_distance = distance
+            nearest_driver = {
+                'id': driver[0],
+                'name': driver[1],
+                'location': driver[5]
+            }
+    return nearest_driver
+
+# Команда /confirm
+def confirm(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text("Ваш заказ подтвержден. Ожидайте водителя.")
+
+# Основная функция
+def main() -> None:
+    updater = Updater(TELEGRAM_BOT_TOKEN)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("order", order))
+    dispatcher.add_handler(CommandHandler("confirm", confirm))
+    dispatcher.add_handler(MessageHandler(Filters.location, handle_location))
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
